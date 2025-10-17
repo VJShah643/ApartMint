@@ -54,7 +54,18 @@ function renderCards(items) {
   cardsEl.innerHTML = items.map(cardTemplate).join('');
 }
 
-async function sendMessage(text) {
+// Session handling: keep a stable sessionId in localStorage
+const SESSION_KEY = 'apartmint_session_id';
+function getSessionId() {
+  let id = localStorage.getItem(SESSION_KEY);
+  if (!id) {
+    id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+    localStorage.setItem(SESSION_KEY, id);
+  }
+  return id;
+}
+
+async function sendMessage(text, { reset = false } = {}) {
   addMessage(text, 'user');
   const btn = $('#chat-form button');
   btn.disabled = true;
@@ -62,7 +73,7 @@ async function sendMessage(text) {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text })
+      body: JSON.stringify({ message: text, sessionId: getSessionId(), reset })
     });
     if (!resp.ok) throw new Error('Request failed');
     const data = await resp.json();
@@ -70,7 +81,9 @@ async function sendMessage(text) {
     const prefs = data.preferences || {};
     const parts = [];
     if (prefs.city) parts.push(`near ${prefs.city}`);
-    if (prefs.rooms) parts.push(`${prefs.rooms}+ rooms`);
+  if (prefs.rooms && prefs.maxRooms) parts.push(`${prefs.rooms}–${prefs.maxRooms} rooms`);
+  else if (prefs.rooms) parts.push(`${prefs.rooms}+ rooms`);
+  else if (prefs.maxRooms) parts.push(`≤ ${prefs.maxRooms} rooms`);
     if (prefs.budget) parts.push(`≤ ${fmt(prefs.budget)} kr/mo`);
     summaryEl.textContent = parts.length ? `Showing results ${parts.join(', ')}` : 'Showing recommended results';
     renderCards(data.results || []);
@@ -101,3 +114,18 @@ $('#chat-form').addEventListener('submit', (e) => {
     }
   } catch {}
 })();
+
+// Optional: add a New Search button dynamically beside the send button
+window.addEventListener('DOMContentLoaded', () => {
+  const form = $('#chat-form');
+  const resetBtn = document.createElement('button');
+  resetBtn.type = 'button';
+  resetBtn.className = 'btn';
+  resetBtn.style.marginLeft = '8px';
+  resetBtn.textContent = 'New search';
+  resetBtn.addEventListener('click', () => {
+    sendMessage('reset', { reset: true });
+    addMessage('Starting a new search. Tell me your preferences.', 'bot');
+  });
+  form.appendChild(resetBtn);
+});

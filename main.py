@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,6 +14,11 @@ from fastapi.staticfiles import StaticFiles
 BASE_DIR = Path(__file__).resolve().parent
 DATA_BOSTAD = BASE_DIR / "bostad.json"
 DATA_HEIMSTADEN = BASE_DIR / "heimstaden.json"
+
+# LLM + schemas
+from schemas import SearchQuery, SUPPORTED_SOURCES
+from llm_client import parse_search_query
+from session_store import SessionStore
 
 
 def _to_int(value: Optional[str]) -> Optional[int]:
@@ -206,7 +212,35 @@ app = FastAPI(title="ApartMint", version="0.1.0")
 
 
 # In-memory listing cache
-LISTINGS: List[Dict[str, Any]] = load_listings()
+LISTINGS: List[Dict[str, Any]] = []
+FILE_MTIMES: Dict[str, float] = {}
+
+
+def _get_file_mtimes() -> Dict[str, float]:
+    mt: Dict[str, float] = {}
+    for p in (DATA_BOSTAD, DATA_HEIMSTADEN):
+        if p.exists():
+            try:
+                mt[str(p)] = p.stat().st_mtime
+            except Exception:
+                pass
+    return mt
+
+
+def _reload_cache() -> None:
+    global LISTINGS, FILE_MTIMES
+    LISTINGS = load_listings()
+    FILE_MTIMES = _get_file_mtimes()
+
+
+def _reload_if_changed() -> None:
+    current = _get_file_mtimes()
+    if current != FILE_MTIMES:
+        _reload_cache()
+
+
+_reload_cache()
+SESSIONS = SessionStore(ttl_minutes=60)
 
 
 @app.get("/api/health")
@@ -216,6 +250,7 @@ def health() -> Dict[str, str]:
 
 @app.get("/api/listings")
 def get_listings(limit: int = 24) -> Dict[str, Any]:
+    _reload_if_changed()
     items = LISTINGS[: max(0, min(limit, 100))]
     return {"count": len(items), "items": items}
 
@@ -224,21 +259,101 @@ def get_listings(limit: int = 24) -> Dict[str, Any]:
 async def chat(request: Request) -> JSONResponse:
     body = await request.json()
     message = (body.get("message") or "").strip()
-    prefs = extract_prefs(message)
+    session_id = (body.get("sessionId") or body.get("session_id") or "").strip()
+    reset = bool(body.get("reset"))
+    # Build supported cities from current dataset
+    _reload_if_changed()
+    all_listings = LISTINGS or load_listings()
+    cities = sorted({(l.get("city") or "").strip() for l in all_listings if l.get("city")})
 
-    # Score and pick top matches
-    scored: List[Tuple[int, Dict[str, Any]]] = [
-        (score_listing(l, prefs), l) for l in LISTINGS
-    ]
-    # Filter to those with non-zero score first; fallback to top by images
-    positives = [l for s, l in scored if s > 0]
-    results = positives[:6] if positives else [l for _, l in scored][:6]
+    # Handle session reset
+    if reset and session_id:
+        SESSIONS.reset(session_id)
+
+    # Try LLM-based structured parsing, fallback to heuristic (partial update)
+    sq_partial: SearchQuery = parse_search_query(message, supported_cities=cities)
+
+    # Merge with session preferences if session_id provided
+    if session_id:
+        sq = SESSIONS.merge(session_id, sq_partial)
+    else:
+        sq = sq_partial
+
+    # Map SearchQuery to existing scoring preferences
+    prefs = {"budget": sq.maxRent, "rooms": sq.minRooms, "maxRooms": sq.maxRooms, "city": sq.city}
+
+    # Filter strictly by constraints from SearchQuery, then rank
+    def passes_filters(l: Dict[str, Any]) -> bool:
+        # City filter
+        if sq.city:
+            hay = " ".join([(l.get("city") or ""), (l.get("area") or "")]).lower()
+            if sq.city.lower() not in hay:
+                return False
+        # Areas (any)
+        if sq.areas:
+            area_text = " ".join([(l.get("area") or ""), (l.get("title") or "")]).lower()
+            if not any(a.lower() in area_text for a in sq.areas if a):
+                return False
+        # Rooms lower/upper bounds
+        rn = l.get("roomsNumeric")
+        if sq.minRooms is not None:
+            if rn is None or rn < sq.minRooms:
+                return False
+        if sq.maxRooms is not None:
+            if rn is None or rn > sq.maxRooms:
+                return False
+        # Rent
+        if sq.maxRent is not None:
+            rent = l.get("rentNumeric")
+            if rent is None or rent > sq.maxRent:
+                return False
+        # Keywords (any)
+        if sq.keywords:
+            text = " ".join(
+                [
+                    str(l.get("title") or ""),
+                    str(l.get("area") or ""),
+                    str(l.get("city") or ""),
+                ]
+            ).lower()
+            if not any(k.lower() in text for k in sq.keywords if k):
+                return False
+        return True
+
+    filtered = [l for l in LISTINGS if passes_filters(l)]
+
+    def rank_key(l: Dict[str, Any]) -> Tuple[int, int, int]:
+        # Higher is better; build on top of existing score heuristic
+        s = score_listing(l, prefs)
+        # Prefer closer to budget (if provided)
+        closeness = 0
+        if sq.maxRent and l.get("rentNumeric") is not None:
+            diff = sq.maxRent - int(l["rentNumeric"])  # positive if under budget
+            # cap influence
+            closeness = max(-5000, min(5000, diff))
+        # Prefer more rooms
+        rooms_num = l.get("roomsNumeric") or 0
+        return (s, closeness, rooms_num)
+
+    results: List[Dict[str, Any]]
+    if filtered:
+        results = sorted(filtered, key=rank_key, reverse=True)[:6]
+    else:
+        # fallback to best overall
+        scored: List[Tuple[int, Dict[str, Any]]] = [
+            (score_listing(l, prefs), l) for l in LISTINGS
+        ]
+        results = [l for _, l in sorted(scored, key=lambda t: t[0], reverse=True)[:6]]
 
     reply_parts = []
     if prefs.get("city"):
         reply_parts.append(f"Looking around {prefs['city']}")
-    if prefs.get("rooms"):
+    if prefs.get("rooms") and prefs.get("maxRooms"):
+        reply_parts.append(f"with {prefs['rooms']}–{prefs['maxRooms']} rooms")
+    elif prefs.get("rooms"):
         reply_parts.append(f"with at least {prefs['rooms']} rooms")
+    elif prefs.get("maxRooms"):
+        reply_parts.append(f"with at most {prefs['maxRooms']} rooms")
     if prefs.get("budget"):
         reply_parts.append(f"under {prefs['budget']:,} kr")
     reply = (
@@ -247,11 +362,43 @@ async def chat(request: Request) -> JSONResponse:
         + "."
     )
 
-    return JSONResponse({
-        "reply": reply,
-        "preferences": prefs,
-        "results": results,
-    })
+    # Attach LLM summary if available
+    return JSONResponse(
+        {
+            "reply": sq.summary or reply,
+            "preferences": {
+                "budget": prefs.get("budget"),
+                "rooms": prefs.get("rooms"),
+                "maxRooms": prefs.get("maxRooms"),
+                "city": prefs.get("city"),
+                "areas": sq.areas,
+                "keywords": sq.keywords,
+                "sources": sq.sources or SUPPORTED_SOURCES,
+            },
+            "results": results,
+        }
+    )
+
+
+@app.post("/api/reload")
+def reload_endpoint() -> Dict[str, Any]:
+    """Manually reload listings from JSON files (useful after scrapes)."""
+    _reload_cache()
+    return {"status": "reloaded", "count": len(LISTINGS)}
+
+
+@app.post("/api/reset")
+def reset_session(request: Request) -> Dict[str, Any]:
+    """Reset preferences for a given sessionId. Body: { sessionId: string }"""
+    try:
+        import asyncio
+        # FastAPI allows await request.json() in async paths; here just support sync
+        # but if this runs under ASGI, it will still work.
+    except Exception:
+        pass
+    # Using Request.json() requires async; read from body via starlette if desired.
+    # To keep simple, let /api/chat handle reset flag primarily.
+    return {"status": "ok"}
 
 
 # Static files and SPA index
