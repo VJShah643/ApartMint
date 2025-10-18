@@ -17,7 +17,7 @@ DATA_HEIMSTADEN = BASE_DIR / "heimstaden.json"
 
 # LLM + schemas
 from schemas import SearchQuery, SUPPORTED_SOURCES
-from llm_client import parse_search_query
+from llm_client import generate_summary_with_llm, parse_search_query
 from session_store import SessionStore
 
 
@@ -215,6 +215,18 @@ app = FastAPI(title="ApartMint", version="0.1.0")
 LISTINGS: List[Dict[str, Any]] = []
 FILE_MTIMES: Dict[str, float] = {}
 
+def summarize_listings_text(listings: List[Dict[str, Any]]) -> str:
+    """Convert listings to short, readable text blocks for the LLM."""
+    parts = []
+    for l in listings[:6]:
+        city = l.get("city") or ""
+        title = l.get("title") or ""
+        rent = l.get("rent") or ""
+        rooms = l.get("rooms") or ""
+        size = l.get("size") or ""
+        parts.append(f"{title} – {rooms} rooms, {size}, rent {rent}, {city}")
+    return "\n".join(parts)
+
 
 def _get_file_mtimes() -> Dict[str, float]:
     mt: Dict[str, float] = {}
@@ -271,7 +283,7 @@ async def chat(request: Request) -> JSONResponse:
         SESSIONS.reset(session_id)
 
     # Try LLM-based structured parsing, fallback to heuristic (partial update)
-    sq_partial: SearchQuery = parse_search_query(message, supported_cities=cities)
+    sq_partial: SearchQuery = parse_search_query(message, supported_cities=cities, session_id=session_id)
 
     # Merge with session preferences if session_id provided
     if session_id:
@@ -361,11 +373,15 @@ async def chat(request: Request) -> JSONResponse:
         + (" ".join(reply_parts) if reply_parts else "you might like")
         + "."
     )
+    # Ask the LLM to summarize the top listings
+    llm_summary = generate_summary_with_llm(message, results, session_id=session_id)
+    if llm_summary:
+        reply = llm_summary
 
     # Attach LLM summary if available
     return JSONResponse(
         {
-            "reply": sq.summary or reply,
+            "reply": reply,
             "preferences": {
                 "budget": prefs.get("budget"),
                 "rooms": prefs.get("rooms"),
