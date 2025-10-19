@@ -44,7 +44,7 @@ def parse_search_query(message: str, supported_cities: List[str]) -> SearchQuery
     """Use Gemini to parse a user message into a SearchQuery. Falls back to heuristics if LLM unavailable."""
     try:
         genai = _get_gemini_client()
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash-exp")
         # Provide a lightweight schema hint in the prompt; in production, consider JSON schema tools/function calling.
         prompt = (
             f"System: {SYS_PROMPT}\n\n"
@@ -82,11 +82,13 @@ def parse_search_query(message: str, supported_cities: List[str]) -> SearchQuery
         m = re.search(r"(?:at\s*least|>=|min)\s*(\d)\s*(?:rum|rooms?|br|r|bed)\b", message, flags=re.I)
         if m:
             min_rooms = int(m.group(1))
-        # plain '2 rooms' if neither qualifier is found; treat as minRooms
+        # plain 'N rooms' without qualifier → treat as exactly N (both min and max)
         if min_rooms is None and max_rooms is None:
             m = re.search(r"(\d)\s*(?:rum|rooms?|br|r|bed)\b", message, flags=re.I)
             if m:
-                min_rooms = int(m.group(1))
+                num = int(m.group(1))
+                min_rooms = num
+                max_rooms = num
         # city from provided list
         for c in supported_cities:
             if re.search(rf"\b{re.escape(c)}\b", message, flags=re.I):

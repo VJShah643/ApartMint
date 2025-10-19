@@ -19,6 +19,13 @@ DATA_HEIMSTADEN = BASE_DIR / "heimstaden.json"
 from schemas import SearchQuery, SUPPORTED_SOURCES
 from llm_client import parse_search_query
 from session_store import SessionStore
+from intent_classifier import classify_intent
+from conversational import (
+    summarize_listing_with_llm,
+    summarize_results_with_llm,
+    generate_greeting_with_llm,
+    generate_help_with_llm,
+)
 
 
 def _to_int(value: Optional[str]) -> Optional[int]:
@@ -63,6 +70,7 @@ def normalize_bostad(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     size_num = _to_float(item.get("size"))
     images = item.get("images") or []
     title = item.get("title") or (area if area else "Listing")
+    description = item.get("description") or ""
     return {
         "source": "bostad",
         "url": item.get("url"),
@@ -77,6 +85,7 @@ def normalize_bostad(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "sizeNumeric": size_num,
         "moveIn": item.get("move_in_date"),
         "landlord": item.get("landlord"),
+        "description": description,
         "images": images,
     }
 
@@ -99,6 +108,8 @@ def normalize_heimstaden(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     size_num = _to_float(item.get("size"))
     images = item.get("images") or []
     title = item.get("address") or (location if location else "Listing")
+    description = item.get("description") or ""
+    facilities = item.get("facilities") or []
     return {
         "source": "heimstaden",
         "url": item.get("url"),
@@ -113,6 +124,8 @@ def normalize_heimstaden(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "sizeNumeric": size_num,
         "moveIn": item.get("available_from"),
         "landlord": None,
+        "description": description,
+        "facilities": facilities,
         "images": images,
     }
 
@@ -270,6 +283,86 @@ async def chat(request: Request) -> JSONResponse:
     if reset and session_id:
         SESSIONS.reset(session_id)
 
+    # Classify intent
+    intent, context = classify_intent(message)
+
+    # Handle greeting
+    if intent == "greeting":
+        greeting_reply = generate_greeting_with_llm(message)
+        return JSONResponse({
+            "reply": greeting_reply,
+            "preferences": {},
+            "results": []
+        })
+
+    # Handle help
+    if intent == "help":
+        help_reply = generate_help_with_llm()
+        return JSONResponse({
+            "reply": help_reply,
+            "preferences": {},
+            "results": []
+        })
+
+    # Handle detail request
+    if intent == "detail" and session_id:
+        last_results = SESSIONS.get_last_results(session_id)
+        if not last_results:
+            return JSONResponse({
+                "reply": "I don't have any recent listings to reference. Try searching first, then ask me about a specific one!",
+                "preferences": {},
+                "results": []
+            })
+        
+        # Try to find the listing by context (title, position, etc.)
+        listing = None
+        ctx_lower = (context or "").lower()
+        
+        # Check for ordinal position: "first", "second", "third", "1st", "2nd", or digit
+        import re
+        ordinal_map = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3,
+                       "fourth": 4, "4th": 4, "fifth": 5, "5th": 5, "sixth": 6, "6th": 6}
+        for word, idx in ordinal_map.items():
+            if word in ctx_lower:
+                if idx <= len(last_results):
+                    listing = last_results[idx - 1]
+                break
+        # Or plain digit
+        if not listing:
+            m = re.search(r'\b(\d+)\b', ctx_lower)
+            if m:
+                idx = int(m.group(1))
+                if 1 <= idx <= len(last_results):
+                    listing = last_results[idx - 1]
+        
+        # Or match by title/address substring
+        if not listing:
+            for item in last_results:
+                title = (item.get("title") or "").lower()
+                area = (item.get("area") or "").lower()
+                if ctx_lower in title or ctx_lower in area:
+                    listing = item
+                    break
+        
+        if not listing and last_results:
+            # Default to first if ambiguous
+            listing = last_results[0]
+        
+        if listing:
+            summary = summarize_listing_with_llm(listing, user_question=message)
+            return JSONResponse({
+                "reply": summary,
+                "preferences": {},
+                "results": [listing]  # show just this one
+            })
+        else:
+            return JSONResponse({
+                "reply": "I couldn't find that listing in your recent results. Could you be more specific or search again?",
+                "preferences": {},
+                "results": []
+            })
+
+    # Default: search intent
     # Try LLM-based structured parsing, fallback to heuristic (partial update)
     sq_partial: SearchQuery = parse_search_query(message, supported_cities=cities)
 
@@ -345,27 +438,17 @@ async def chat(request: Request) -> JSONResponse:
         ]
         results = [l for _, l in sorted(scored, key=lambda t: t[0], reverse=True)[:6]]
 
-    reply_parts = []
-    if prefs.get("city"):
-        reply_parts.append(f"Looking around {prefs['city']}")
-    if prefs.get("rooms") and prefs.get("maxRooms"):
-        reply_parts.append(f"with {prefs['rooms']}–{prefs['maxRooms']} rooms")
-    elif prefs.get("rooms"):
-        reply_parts.append(f"with at least {prefs['rooms']} rooms")
-    elif prefs.get("maxRooms"):
-        reply_parts.append(f"with at most {prefs['maxRooms']} rooms")
-    if prefs.get("budget"):
-        reply_parts.append(f"under {prefs['budget']:,} kr")
-    reply = (
-        "I found some options "
-        + (" ".join(reply_parts) if reply_parts else "you might like")
-        + "."
-    )
+    # Store last results in session for detail queries
+    if session_id and results:
+        SESSIONS.set_last_results(session_id, results)
+
+    # Generate conversational result summary using LLM
+    result_summary = summarize_results_with_llm(results, prefs)
 
     # Attach LLM summary if available
     return JSONResponse(
         {
-            "reply": sq.summary or reply,
+            "reply": result_summary,
             "preferences": {
                 "budget": prefs.get("budget"),
                 "rooms": prefs.get("rooms"),

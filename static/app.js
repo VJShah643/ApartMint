@@ -14,6 +14,34 @@ function addMessage(text, who = 'user') {
   msg.appendChild(bubble);
   messagesEl.appendChild(msg);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  return bubble;
+}
+
+function addTypingIndicator() {
+  const msg = document.createElement('div');
+  msg.className = 'msg bot typing-indicator';
+  msg.id = 'typing-indicator';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+  msg.appendChild(bubble);
+  messagesEl.appendChild(msg);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return msg;
+}
+
+function removeTypingIndicator() {
+  const indicator = document.getElementById('typing-indicator');
+  if (indicator) indicator.remove();
+}
+
+async function typeText(bubble, text, speed = 15) {
+  bubble.textContent = '';
+  for (let i = 0; i < text.length; i++) {
+    bubble.textContent += text[i];
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (speed > 0) await new Promise(r => setTimeout(r, speed));
+  }
 }
 
 function fmt(n) {
@@ -31,6 +59,9 @@ function cardTemplate(l) {
   const size = l.sizeNumeric ? `${l.sizeNumeric} m²` : (l.size || '');
   const city = l.city || '';
   const title = l.title || 'Listing';
+  const description = l.description || l.description_en || '';
+  const descriptionSnippet = description.length > 120 ? description.slice(0, 120) + '...' : description;
+  
   return `
   <article class="card">
     <div class="card__media">${img ? `<img src="${img}" alt="${title}">` : ''}</div>
@@ -42,6 +73,7 @@ function cardTemplate(l) {
         ${size ? `<span class="pill">${size}</span>` : ''}
       </div>
       <div class="meta">${city ? city + ' · ' : ''}${l.area || ''}</div>
+      ${descriptionSnippet ? `<p class="card__description">${descriptionSnippet}</p>` : ''}
     </div>
     <div class="card__footer">
       <a class="link" href="${l.url}" target="_blank" rel="noopener">Open listing</a>
@@ -69,6 +101,10 @@ async function sendMessage(text, { reset = false } = {}) {
   addMessage(text, 'user');
   const btn = $('#chat-form button');
   btn.disabled = true;
+  
+  // Show typing indicator
+  const typingIndicator = addTypingIndicator();
+  
   try {
     const resp = await fetch('/api/chat', {
       method: 'POST',
@@ -77,24 +113,44 @@ async function sendMessage(text, { reset = false } = {}) {
     });
     if (!resp.ok) throw new Error('Request failed');
     const data = await resp.json();
-    addMessage(data.reply || 'Here are some options.', 'bot');
+    
+    // Remove typing indicator and add bot message with typing effect
+    removeTypingIndicator();
+    const botBubble = addMessage('', 'bot');
+    await typeText(botBubble, data.reply || 'Here are some options.', 15);
+    
     const prefs = data.preferences || {};
-    const parts = [];
-    if (prefs.city) parts.push(`near ${prefs.city}`);
-  if (prefs.rooms && prefs.maxRooms) parts.push(`${prefs.rooms}–${prefs.maxRooms} rooms`);
-  else if (prefs.rooms) parts.push(`${prefs.rooms}+ rooms`);
-  else if (prefs.maxRooms) parts.push(`≤ ${prefs.maxRooms} rooms`);
-    if (prefs.budget) parts.push(`≤ ${fmt(prefs.budget)} kr/mo`);
-    summaryEl.textContent = parts.length ? `Showing results ${parts.join(', ')}` : 'Showing recommended results';
-    renderCards(data.results || []);
+    const results = data.results || [];
+    
+    // Only show filter summary and cards if we have results
+    if (results.length > 0) {
+      const parts = [];
+      if (prefs.city) parts.push(`near ${prefs.city}`);
+      if (prefs.rooms && prefs.maxRooms && prefs.rooms === prefs.maxRooms) {
+        parts.push(`exactly ${prefs.rooms} room${prefs.rooms > 1 ? 's' : ''}`);
+      } else if (prefs.rooms && prefs.maxRooms) {
+        parts.push(`${prefs.rooms}–${prefs.maxRooms} rooms`);
+      } else if (prefs.rooms) {
+        parts.push(`${prefs.rooms}+ rooms`);
+      } else if (prefs.maxRooms) {
+        parts.push(`≤ ${prefs.maxRooms} rooms`);
+      }
+      if (prefs.budget) parts.push(`≤ ${fmt(prefs.budget)} kr/mo`);
+      summaryEl.textContent = parts.length ? `Showing results ${parts.join(', ')}` : 'Showing recommended results';
+      renderCards(results);
+    } else {
+      // No results (greeting/help/detail with no match) — clear cards but keep summary friendly
+      summaryEl.textContent = 'Ask me anything about apartments!';
+      cardsEl.innerHTML = '';
+    }
   } catch (e) {
-    addMessage('Sorry, something went wrong. Please try again.', 'bot');
+    removeTypingIndicator();
+    const errBubble = addMessage('', 'bot');
+    await typeText(errBubble, 'Sorry, something went wrong. Please try again.', 15);
   } finally {
     btn.disabled = false;
   }
-}
-
-$('#chat-form').addEventListener('submit', (e) => {
+}$('#chat-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const input = $('#message-input');
   const val = input.value.trim();

@@ -35,6 +35,7 @@ def merge_queries(base: SearchQuery, update: SearchQuery) -> SearchQuery:
 class SessionData:
     prefs: SearchQuery = field(default_factory=SearchQuery)
     updated_at: datetime = field(default_factory=datetime.utcnow)
+    last_results: list = field(default_factory=list)  # store last shown listings for detail queries
 
 
 class SessionStore:
@@ -52,14 +53,29 @@ class SessionStore:
             return SearchQuery()
         return sd.prefs
 
-    def set(self, session_id: str, prefs: SearchQuery) -> None:
-        self._data[session_id] = SessionData(prefs=prefs, updated_at=datetime.utcnow())
+    def set(self, session_id: str, prefs: SearchQuery, last_results: list = None) -> None:
+        sd = self._data.get(session_id, SessionData())
+        sd.prefs = prefs
+        sd.updated_at = datetime.utcnow()
+        if last_results is not None:
+            sd.last_results = last_results
+        self._data[session_id] = sd
 
     def merge(self, session_id: str, update: SearchQuery) -> SearchQuery:
         current = self.get(session_id)
         merged = merge_queries(current, update)
         self.set(session_id, merged)
         return merged
+
+    def get_last_results(self, session_id: str) -> list:
+        sd = self._data.get(session_id)
+        return sd.last_results if sd else []
+
+    def set_last_results(self, session_id: str, results: list) -> None:
+        sd = self._data.get(session_id)
+        if sd:
+            sd.last_results = results
+            sd.updated_at = datetime.utcnow()
 
     def reset(self, session_id: str) -> None:
         self._data.pop(session_id, None)
