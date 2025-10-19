@@ -34,9 +34,9 @@ for file in os.listdir(DOCS_FOLDER):
                     "text": chunk
                 })
 
-print(f"✅ Loaded {len(data)} text chunks from '{DOCS_FOLDER}'")
+print(f"Loaded {len(data)} text chunks from '{DOCS_FOLDER}'")
 
-# --- Step 2. Embed each chunk ---
+# Embed each chunk ---
 model = SentenceTransformer("all-MiniLM-L6-v2")
 texts = [d["text"] for d in data]
 embeddings = model.encode(texts, convert_to_numpy=True)
@@ -46,7 +46,7 @@ dimension = embeddings.shape[1]
 index = faiss.IndexFlatL2(dimension)
 index.add(embeddings)
 
-# --- Step 4. Save FAISS index and metadata ---
+# Save FAISS index and metadata ---
 faiss.write_index(index, "apply_info.index")
 with open("apply_info_meta.pkl", "wb") as f:
     pickle.dump(data, f)
