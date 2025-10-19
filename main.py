@@ -10,16 +10,25 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+# LLM + schemas
+from schemas import SearchQuery, SUPPORTED_SOURCES
+from llm_client import generate_summary_with_llm, parse_search_query, generate_answer_from_context
+from session_store import SessionStore
+import faiss
+import pickle
+from sentence_transformers import SentenceTransformer
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_BOSTAD = BASE_DIR / "bostad.json"
 DATA_HEIMSTADEN = BASE_DIR / "heimstaden.json"
 
-# LLM + schemas
-from schemas import SearchQuery, SUPPORTED_SOURCES
-from llm_client import generate_summary_with_llm, parse_search_query
-from session_store import SessionStore
 
+
+RAG_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+RAG_INDEX = faiss.read_index("apply_info.index")
+with open("apply_info_meta.pkl", "rb") as f:
+    RAG_META = pickle.load(f)
 
 def _to_int(value: Optional[str]) -> Optional[int]:
     if not value or not isinstance(value, str):
@@ -207,6 +216,26 @@ def score_listing(l: Dict[str, Any], prefs: Dict[str, Any]) -> int:
         score += 1
     return score
 
+def rag_search_apply_info(query: str, top_k: int = 2):
+    """
+    Search the FAISS index for relevant 'how to apply' information.
+    Only triggers if the query is about applying or registration.
+    """
+    keywords = ["apply", "application", "queue", "register", "sign up", "process"]
+    if not any(word in query.lower() for word in keywords):
+        return None
+
+    q_emb = RAG_MODEL.encode([query])
+    distances, indices = RAG_INDEX.search(q_emb, top_k)
+    if not len(indices):
+        return None
+
+    results = [RAG_META[i]["text"] for i in indices[0] if i != -1]
+    if not results:
+        return None
+
+    return "\n".join(results)
+
 
 app = FastAPI(title="ApartMint", version="0.1.0")
 
@@ -373,8 +402,15 @@ async def chat(request: Request) -> JSONResponse:
         + (" ".join(reply_parts) if reply_parts else "you might like")
         + "."
     )
-    # Ask the LLM to summarize the top listings
-    llm_summary = generate_summary_with_llm(message, results, session_id=session_id)
+    llm_summary = None
+    # --- Check if the user asked about applying ---
+    apply_info = rag_search_apply_info(message)
+    if apply_info:
+        llm_summary = generate_answer_from_context(message, apply_info, session_id=session_id)
+    else:
+        # Ask the LLM to summarize the top listings
+        llm_summary = generate_summary_with_llm(message, results, session_id=session_id)
+    
     if llm_summary:
         reply = llm_summary
 

@@ -154,3 +154,28 @@ def generate_summary_with_llm(user_query: str, listings: List[Dict[str, Any]], s
     except Exception as e:
         print("Summary generation failed:", e)
         return None
+def generate_answer_from_context(user_query: str, context_text: str, session_id: Optional[str] = None) -> Optional[str]:
+    """
+    Use retrieved RAG context (for example, 'how to apply' info) to answer the user's question.
+    Shares the same persistent Gemini chat session.
+    The model should only rely on the given context when answering.
+    """
+    chat = get_chat_session(session_id or "default")
+
+    prompt = (
+        "You are a helpful real estate assistant. "
+        "Answer the user's question using ONLY the information provided in the context on how to apply to heimstaden or bostad.se apartments. "
+        "If the answer is not contained in the context, say poloitely that you don't know and suggest the user visit the official website for more information and also mention what kind of information you provide here "
+        "Do not invent or assume details.\n\n"
+        f"Context:\n{context_text}\n\n"
+        f"User question:\n{user_query}\n\n"
+        "Answer clearly and naturally:"
+    )
+
+    try:
+        resp = chat.send_message(prompt)
+        answer = resp.text.strip()
+        return answer
+    except Exception as e:
+        print("Context-based answering failed:", e)
+        return None
