@@ -34,7 +34,6 @@ for file in os.listdir(DOCS_FOLDER):
                     "text": chunk
                 })
 
-print(f"Loaded {len(data)} text chunks from '{DOCS_FOLDER}'")
 
 # Embed each chunk ---
 model = SentenceTransformer("all-MiniLM-L6-v2")
