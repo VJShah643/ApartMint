@@ -36,6 +36,9 @@ class SessionData:
     prefs: SearchQuery = field(default_factory=SearchQuery)
     updated_at: datetime = field(default_factory=datetime.utcnow)
     last_results: list = field(default_factory=list)  # store last shown listings for detail queries
+    current_listing: Optional[dict] = None  # track which listing user is currently discussing
+    conversation_context: str = ""  # track what we're talking about
+    current_mode: str = "broker"  # "broker" or "advisor" mode
 
 
 class SessionStore:
@@ -76,6 +79,44 @@ class SessionStore:
         if sd:
             sd.last_results = results
             sd.updated_at = datetime.utcnow()
+
+    def get_current_listing(self, session_id: str) -> Optional[dict]:
+        """Get the listing currently being discussed."""
+        sd = self._data.get(session_id)
+        return sd.current_listing if sd else None
+
+    def set_current_listing(self, session_id: str, listing: Optional[dict]) -> None:
+        """Set the listing currently being discussed."""
+        sd = self._data.get(session_id)
+        if sd:
+            sd.current_listing = listing
+            sd.updated_at = datetime.utcnow()
+
+    def get_conversation_context(self, session_id: str) -> str:
+        """Get the current conversation context (e.g., 'discussing_listing', 'searching')."""
+        sd = self._data.get(session_id)
+        return sd.conversation_context if sd else ""
+
+    def set_conversation_context(self, session_id: str, context: str) -> None:
+        """Set the conversation context."""
+        sd = self._data.get(session_id)
+        if sd:
+            sd.conversation_context = context
+            sd.updated_at = datetime.utcnow()
+
+    def get_mode(self, session_id: str) -> str:
+        """Get the current mode ('broker' or 'advisor')."""
+        sd = self._data.get(session_id)
+        return sd.current_mode if sd else "broker"
+
+    def set_mode(self, session_id: str, mode: str) -> None:
+        """Set the current mode ('broker' or 'advisor')."""
+        if mode not in ["broker", "advisor"]:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'broker' or 'advisor'.")
+        sd = self._data.get(session_id, SessionData())
+        sd.current_mode = mode
+        sd.updated_at = datetime.utcnow()
+        self._data[session_id] = sd
 
     def reset(self, session_id: str) -> None:
         self._data.pop(session_id, None)

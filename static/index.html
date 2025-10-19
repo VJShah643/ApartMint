@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=3" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🌿</text></svg>">
   </head>
   <body>
@@ -20,6 +20,16 @@
               <h1>ApartMint</h1>
               <p>Smart apartment chat</p>
             </div>
+          </div>
+          <div class="mode-toggle" data-active-mode="broker">
+            <button class="mode-btn mode-btn--active" data-mode="broker" id="broker-mode-btn">
+              <span class="mode-icon">🔍</span>
+              <span class="mode-label">Broker</span>
+            </button>
+            <button class="mode-btn" data-mode="advisor" id="advisor-mode-btn">
+              <span class="mode-icon">🎓</span>
+              <span class="mode-label">Advisor</span>
+            </button>
           </div>
         </header>
         <main class="chat__messages" id="messages"></main>
@@ -48,6 +58,6 @@
       </section>
     </div>
 
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=3" defer></script>
   </body>
-  </html>
+</html>

@@ -41,6 +41,86 @@ body {
 .brand h1 { margin: 0; font-size: 20px; letter-spacing: 0.5px; }
 .brand p { margin: 0; color: var(--muted); font-size: 12px; }
 
+/* Mode Toggle Switch - iOS Style */
+.mode-toggle {
+  margin-top: 12px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  background: #0a0f0d;
+  padding: 3px;
+  border-radius: 20px;
+  border: 1px solid #1a2622;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.4);
+  width: 240px;
+  height: 40px;
+}
+
+/* Animated sliding pill */
+.mode-toggle::before {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  height: calc(100% - 6px);
+  background: linear-gradient(135deg, var(--mint) 0%, var(--mint-600) 100%);
+  border-radius: 17px;
+  box-shadow: 
+    0 2px 8px rgba(79, 227, 180, 0.3),
+    0 4px 16px rgba(79, 227, 180, 0.2);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 1;
+}
+
+.mode-toggle[data-active-mode="advisor"]::before {
+  transform: translateX(calc(100% + 3px));
+}
+
+.mode-btn {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: #4a5854;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  font-family: inherit;
+  height: 100%;
+  user-select: none;
+}
+
+.mode-btn:hover {
+  color: #6a7874;
+}
+
+.mode-btn--active {
+  color: #0b1210;
+}
+
+.mode-icon {
+  font-size: 15px;
+  transition: transform 0.3s ease;
+  display: inline-block;
+}
+
+.mode-btn--active .mode-icon {
+  transform: scale(1.15);
+}
+
+.mode-label {
+  letter-spacing: 0.3px;
+  font-weight: 700;
+}
+
 .chat__messages { padding: 18px; overflow: auto; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 .msg { display: flex; gap: 10px; }
 .msg .bubble {

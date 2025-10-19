@@ -9,19 +9,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def summarize_listing_with_llm(listing: Dict[str, Any], user_question: str = "") -> str:
+def summarize_listing_with_llm(listing: Dict[str, Any], user_question: str = "", previous_conversation: str = "") -> str:
     """Use Gemini to generate a natural conversational summary of a listing.
     
     Args:
         listing: normalized listing dict
-        user_question: optional user query like "tell me more about this one"
+        user_question: optional user query like "tell me more about this one" or "does it have internet?"
+        previous_conversation: previous messages about this listing for context
     
     Returns:
-        A 2-4 sentence natural summary highlighting key details.
+        A 2-4 sentence natural summary highlighting key details, or specific answer to follow-up question.
     """
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_API_KEY")
     if not api_key:
-        return _fallback_summary(listing)
+        return _fallback_summary(listing, user_question)
     
     try:
         import google.generativeai as genai  # type: ignore
@@ -44,35 +45,68 @@ def summarize_listing_with_llm(listing: Dict[str, Any], user_question: str = "")
         description = listing.get("description") or listing.get("description_en") or ""
         facilities = listing.get("facilities") or listing.get("facilities_en") or []
         
-        prompt = (
-            f"You are a friendly apartment search assistant. Summarize this listing in 3-5 sentences for a user. "
-            f"Be conversational and highlight important details. Include key points from the description.\n\n"
-            f"Listing: {title}\n"
-            f"Location: {city}, {area}\n"
-            f"Rent: {rent}\n"
-            f"Rooms: {rooms}\n"
-            f"Size: {size}\n"
-            f"Move-in: {move_in}\n"
-            f"Landlord: {landlord}\n"
-            f"Images: {images_count}\n"
-            f"Description: {description}\n"  # Full description, no limit
-            f"Facilities: {', '.join(facilities[:20]) if facilities else 'N/A'}\n\n"
-        )
+        # Detect if this is a follow-up question (asking specific details, not requesting initial summary)
+        is_follow_up = bool(user_question and any(word in user_question.lower() for word in 
+            ["does it", "is there", "are there", "what about", "how about", "included", "have",
+             "contact", "reach", "get in touch", "landlord", "email", "phone", "call",
+             "internet", "water", "electricity", "utilities", "wifi", "parking", 
+             "balcony", "elevator", "laundry", "pets", "furnished"]))
         
-        if user_question:
-            prompt += f"User asked: '{user_question}'\n"
-        
-        prompt += "Provide a friendly, natural summary."
+        if is_follow_up:
+            # This is a follow-up question about the listing
+            # For follow-ups, we DON'T repeat the summary - just answer the specific question
+            prompt = (
+                f"You are a helpful apartment search assistant. The user already knows about this listing and is asking a specific follow-up question.\n\n"
+                f"CONTEXT (for reference only - do NOT repeat this in your answer):\n"
+                f"Listing: {title}\n"
+                f"Location: {city}, {area}\n"
+                f"Rent: {rent}\n"
+                f"Rooms: {rooms}\n"
+                f"Size: {size}\n"
+                f"Move-in: {move_in}\n"
+                f"Landlord: {landlord}\n"
+                f"Description: {description}\n"
+                f"Facilities: {', '.join(facilities[:20]) if facilities else 'N/A'}\n\n"
+                f"User's specific question: '{user_question}'\n\n"
+                f"IMPORTANT INSTRUCTIONS:\n"
+                f"- Answer ONLY their specific question - do NOT repeat the listing description or summary\n"
+                f"- Be direct and concise (1-2 sentences max)\n"
+                f"- If they ask HOW to contact the landlord, say 'You can contact {landlord} directly - their contact details should be in the full listing or on the rental platform.'\n"
+                f"- If the answer isn't in the listing details above, say \"That's not mentioned in the listing - you'd need to contact {landlord} to find out.\"\n"
+                f"- If they ask about specific amenities/features, check the description and facilities list\n"
+                f"- Be friendly but brief"
+            )
+        else:
+            # Initial summary request
+            prompt = (
+                f"You are a friendly apartment search assistant. Summarize this listing in 3-5 sentences for a user. "
+                f"Be conversational and highlight important details. Include key points from the description.\n\n"
+                f"Listing: {title}\n"
+                f"Location: {city}, {area}\n"
+                f"Rent: {rent}\n"
+                f"Rooms: {rooms}\n"
+                f"Size: {size}\n"
+                f"Move-in: {move_in}\n"
+                f"Landlord: {landlord}\n"
+                f"Images: {images_count}\n"
+                f"Description: {description}\n"
+                f"Facilities: {', '.join(facilities[:20]) if facilities else 'N/A'}\n\n"
+            )
+            
+            if user_question:
+                prompt += f"User asked: '{user_question}'\n"
+            
+            prompt += "Provide a friendly, natural summary."
         
         resp = model.generate_content(prompt)
         text = resp.text if hasattr(resp, "text") else (resp.candidates[0].content.parts[0].text if resp.candidates else "")
-        return text.strip() or _fallback_summary(listing)
+        return text.strip() or _fallback_summary(listing, user_question)
     
     except Exception:
-        return _fallback_summary(listing)
+        return _fallback_summary(listing, user_question)
 
 
-def _fallback_summary(listing: Dict[str, Any]) -> str:
+def _fallback_summary(listing: Dict[str, Any], user_question: str = "") -> str:
     """Template-based summary if LLM unavailable."""
     title = listing.get("title") or "This apartment"
     city = listing.get("city") or "the area"
@@ -268,3 +302,121 @@ def _fallback_help() -> str:
         "I'll remember your preferences across our conversation, so you can refine your search step by step. "
         "Ask me for 'details on the second listing' to learn more about specific apartments!"
     )
+
+
+def generate_advisor_response(user_question: str, conversation_history: list = None, broker_listings: list = None) -> Dict[str, Any]:
+    """Generate advisor mode response using RAG + LLM.
+    
+    This is the main advisor mode function that:
+    1. Retrieves relevant context from knowledge base
+    2. Optionally includes broker mode listings if provided
+    3. Builds prompt with context
+    4. Generates response with LLM
+    5. Returns formatted response with sources
+    
+    Args:
+        user_question: The user's question
+        conversation_history: Optional list of previous messages for context
+        broker_listings: Optional list of apartment listings from broker mode to reference
+    
+    Returns:
+        Dict with:
+            - response: The advisor's response text
+            - sources: List of source files consulted
+            - suggested_questions: Follow-up questions to suggest
+    """
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_API_KEY")
+    
+    try:
+        # Import RAG system
+        from rag_system import get_knowledge_base
+        from advisor_prompts import (
+            build_advisor_prompt, 
+            format_advisor_response_with_sources,
+            get_suggested_questions
+        )
+        
+        # Get knowledge base instance
+        kb = get_knowledge_base()
+        
+        # Retrieve relevant context
+        retrieved_chunks = kb.retrieve(user_question, n_results=5)
+        
+        # Format context for LLM
+        formatted_context = kb.retrieve_formatted(user_question, n_results=5)
+        
+        # Add broker listings to context if provided
+        if broker_listings and len(broker_listings) > 0:
+            listings_context = "\n\n## Available Listings from Recent Search\n\n"
+            for idx, listing in enumerate(broker_listings[:10], 1):  # Max 10 listings
+                listings_context += f"**Listing {idx}**: {listing.get('title', 'Untitled')}\n"
+                listings_context += f"- Location: {listing.get('city', '')}, {listing.get('area', '')}\n"
+                listings_context += f"- Rent: {listing.get('rent', 'N/A')}\n"
+                listings_context += f"- Rooms: {listing.get('rooms', 'N/A')}\n"
+                listings_context += f"- Size: {listing.get('size', 'N/A')}\n"
+                listings_context += f"- Move-in: {listing.get('moveIn', 'N/A')}\n"
+                listings_context += f"- Landlord: {listing.get('landlord', 'N/A')}\n"
+                description = listing.get('description') or listing.get('description_en') or ''
+                if description:
+                    desc_snippet = description[:200] + '...' if len(description) > 200 else description
+                    listings_context += f"- Description: {desc_snippet}\n"
+                listings_context += "\n"
+            formatted_context += listings_context
+        
+        # Build full prompt
+        full_prompt = build_advisor_prompt(
+            user_question=user_question,
+            retrieved_context=formatted_context,
+            conversation_history=conversation_history
+        )
+        
+        # Generate response with LLM if available
+        if api_key:
+            import google.generativeai as genai  # type: ignore
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-2.0-flash-exp")
+            
+            resp = model.generate_content(full_prompt)
+            response_text = resp.text if hasattr(resp, "text") else (
+                resp.candidates[0].content.parts[0].text if resp.candidates else ""
+            )
+        else:
+            # Fallback if no API key
+            response_text = (
+                "I'd love to help with your question, but I need an API key to generate responses. "
+                "However, I found relevant information in these sources:\n\n"
+            )
+            for chunk in retrieved_chunks[:3]:
+                response_text += f"**{chunk['section']}** (from {chunk['source_file']})\n\n"
+                response_text += chunk['text'][:300] + "...\n\n"
+        
+        # Format response with sources
+        formatted_response = format_advisor_response_with_sources(
+            response=response_text.strip(),
+            sources=retrieved_chunks
+        )
+        
+        # Get suggested follow-up questions
+        suggested = get_suggested_questions(user_question, retrieved_chunks)
+        
+        return {
+            'response': formatted_response['response_with_sources'],
+            'sources': formatted_response['sources'],
+            'suggested_questions': suggested
+        }
+    
+    except Exception as e:
+        # Graceful fallback if RAG system fails
+        return {
+            'response': (
+                f"I apologize, but I encountered an issue accessing my knowledge base. "
+                f"Please try switching to Broker Mode to search for apartments, or try your question again. "
+                f"(Error: {str(e)})"
+            ),
+            'sources': [],
+            'suggested_questions': [
+                "How do I register for Bostadsförmedling?",
+                "What are good neighborhoods for students?",
+                "What documents do I need for apartment applications?"
+            ]
+        }

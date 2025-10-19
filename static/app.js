@@ -35,12 +35,35 @@ function removeTypingIndicator() {
   if (indicator) indicator.remove();
 }
 
+function formatMarkdown(text) {
+  // Convert markdown to HTML for rendering
+  return text
+    // Bold: **text** -> <strong>text</strong>
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    // Bullet points: - item -> <li>item</li>
+    .replace(/^- (.+)$/gm, '<li>$1</li>')
+    // Wrap consecutive list items in <ul>
+    .replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+    // Line breaks
+    .replace(/\n\n/g, '<br><br>');
+}
+
 async function typeText(bubble, text, speed = 15) {
-  bubble.textContent = '';
-  for (let i = 0; i < text.length; i++) {
-    bubble.textContent += text[i];
+  // Check if text contains markdown formatting
+  const hasMarkdown = /\*\*/.test(text) || /^- /m.test(text);
+  
+  if (hasMarkdown) {
+    // For markdown text, convert to HTML and set innerHTML directly (no typing animation)
+    bubble.innerHTML = formatMarkdown(text);
     messagesEl.scrollTop = messagesEl.scrollHeight;
-    if (speed > 0) await new Promise(r => setTimeout(r, speed));
+  } else {
+    // Plain text - use typing animation
+    bubble.textContent = '';
+    for (let i = 0; i < text.length; i++) {
+      bubble.textContent += text[i];
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (speed > 0) await new Promise(r => setTimeout(r, speed));
+    }
   }
 }
 
@@ -88,6 +111,8 @@ function renderCards(items) {
 
 // Session handling: keep a stable sessionId in localStorage
 const SESSION_KEY = 'apartmint_session_id';
+const MODE_KEY = 'apartmint_current_mode';
+
 function getSessionId() {
   let id = localStorage.getItem(SESSION_KEY);
   if (!id) {
@@ -95,6 +120,68 @@ function getSessionId() {
     localStorage.setItem(SESSION_KEY, id);
   }
   return id;
+}
+
+function getCurrentMode() {
+  return localStorage.getItem(MODE_KEY) || 'broker';
+}
+
+function setCurrentMode(mode) {
+  localStorage.setItem(MODE_KEY, mode);
+  updateModeUI(mode);
+}
+
+function updateModeUI(mode) {
+  const brokerBtn = document.getElementById('broker-mode-btn');
+  const advisorBtn = document.getElementById('advisor-mode-btn');
+  const modeToggle = document.querySelector('.mode-toggle');
+  
+  // Update button active states
+  if (mode === 'broker') {
+    brokerBtn.classList.add('mode-btn--active');
+    advisorBtn.classList.remove('mode-btn--active');
+  } else {
+    advisorBtn.classList.add('mode-btn--active');
+    brokerBtn.classList.remove('mode-btn--active');
+  }
+  
+  // Update data attribute for sliding animation
+  if (modeToggle) {
+    modeToggle.setAttribute('data-active-mode', mode);
+  }
+}
+
+async function switchMode(mode) {
+  const btn = $('#chat-form button');
+  btn.disabled = true;
+  
+  try {
+    const resp = await fetch('/api/switch_mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: getSessionId(), mode })
+    });
+    
+    if (!resp.ok) throw new Error('Mode switch failed');
+    const data = await resp.json();
+    
+    // Update local mode silently (no chat message)
+    setCurrentMode(mode);
+    
+    // Update summary text based on mode
+    if (mode === 'advisor') {
+      cardsEl.innerHTML = '';
+      summaryEl.textContent = '🎓 Ask me anything about housing in Sweden!';
+    } else {
+      summaryEl.textContent = '🔍 Tell me what you\'re looking for to see listings.';
+    }
+  } catch (e) {
+    // Only show error if switch actually failed
+    const errBubble = addMessage('', 'bot');
+    await typeText(errBubble, 'Sorry, mode switch failed. Please try again.', 15);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function sendMessage(text, { reset = false } = {}) {
@@ -173,6 +260,22 @@ async function sendMessage(text, { reset = false } = {}) {
 
 // Optional: add a New Search button dynamically beside the send button
 window.addEventListener('DOMContentLoaded', () => {
+  // Initialize mode UI
+  updateModeUI(getCurrentMode());
+  
+  // Add mode toggle event listeners
+  document.getElementById('broker-mode-btn').addEventListener('click', () => {
+    if (getCurrentMode() !== 'broker') {
+      switchMode('broker');
+    }
+  });
+  
+  document.getElementById('advisor-mode-btn').addEventListener('click', () => {
+    if (getCurrentMode() !== 'advisor') {
+      switchMode('advisor');
+    }
+  });
+  
   const form = $('#chat-form');
   const resetBtn = document.createElement('button');
   resetBtn.type = 'button';
