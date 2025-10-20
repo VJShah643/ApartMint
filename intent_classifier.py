@@ -52,7 +52,8 @@ def _classify_with_llm(message: str, conversation_context: str = "") -> Optional
             context_hint = (
                 "\n\nIMPORTANT: The user is currently discussing a specific apartment listing. "
                 "If their message is a follow-up question about that listing (e.g., asking about features, "
-                "utilities, amenities, details), classify it as 'detail' intent, NOT 'search'."
+                "utilities, amenities, details) OR if they want to see that listing again (e.g., 'show me again', "
+                "'tell me about that one', 'display it'), classify it as 'detail' intent with context='current', NOT 'search'."
             )
         
         prompt = (
@@ -100,12 +101,14 @@ def _classify_with_regex(message: str, conversation_context: str = "") -> Tuple[
     
     # If we're discussing a listing and the message is a short question, it's likely a follow-up
     if conversation_context == "discussing_listing":
-        # Questions about features/utilities
+        # Questions about features/utilities or requests to see listing again
         follow_up_patterns = [
             r"\b(does it have|is there|are there|what about|how about)\b",
             r"\b(internet|water|electricity|heating|utilities|included|extra)\b",
             r"\b(balcony|parking|elevator|laundry|pets|furnished)\b",
             r"^(so|and|also|what|when|where|how|why)\s+",
+            r"\b(show|tell|describe|display)\s+(me|it|that|this)\s+(again|once more)\b",
+            r"\b(that|this|the)\s+(listing|apartment|one|place)\b",
         ]
         for pat in follow_up_patterns:
             if re.search(pat, msg_lower):

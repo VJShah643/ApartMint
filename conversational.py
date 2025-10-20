@@ -348,8 +348,12 @@ def generate_advisor_response(user_question: str, conversation_history: list = N
         # Add broker listings to context if provided
         if broker_listings and len(broker_listings) > 0:
             listings_context = "\n\n## Available Listings from Recent Search\n\n"
+            listings_context += "The user has these listings visible from their recent broker search. "
+            listings_context += "When they refer to ordinal positions (e.g., 'first', 'second', '3rd', '6th listing'), "
+            listings_context += "use the listing numbers below:\n\n"
+            
             for idx, listing in enumerate(broker_listings[:10], 1):  # Max 10 listings
-                listings_context += f"**Listing {idx}**: {listing.get('title', 'Untitled')}\n"
+                listings_context += f"**Listing #{idx}**: {listing.get('title', 'Untitled')}\n"
                 listings_context += f"- Location: {listing.get('city', '')}, {listing.get('area', '')}\n"
                 listings_context += f"- Rent: {listing.get('rent', 'N/A')}\n"
                 listings_context += f"- Rooms: {listing.get('rooms', 'N/A')}\n"
@@ -358,7 +362,7 @@ def generate_advisor_response(user_question: str, conversation_history: list = N
                 listings_context += f"- Landlord: {listing.get('landlord', 'N/A')}\n"
                 description = listing.get('description') or listing.get('description_en') or ''
                 if description:
-                    desc_snippet = description[:200] + '...' if len(description) > 200 else description
+                    desc_snippet = description[:250] + '...' if len(description) > 250 else description
                     listings_context += f"- Description: {desc_snippet}\n"
                 listings_context += "\n"
             formatted_context += listings_context

@@ -301,10 +301,11 @@ async def chat(request: Request) -> JSONResponse:
             broker_listings=broker_listings
         )
         
+        # Return empty results - frontend will keep existing cards visible in advisor mode
         return JSONResponse({
             "reply": advisor_result['response'],
             "preferences": {},
-            "results": [],
+            "results": [],  # Frontend handles keeping cards visible
             "mode": "advisor",
             "sources": advisor_result.get('sources', []),
             "suggested_questions": advisor_result.get('suggested_questions', [])
@@ -336,6 +337,34 @@ async def chat(request: Request) -> JSONResponse:
 
     # Handle detail request
     if intent == "detail" and session_id:
+        # Special case: "show me again" or similar should show full list, not single listing
+        msg_lower = message.lower().strip()
+        show_list_patterns = [
+            r"^show\s+(me\s+)?(them\s+)?(again|all|list|the\s+list)",
+            r"^(see|view|display)\s+(them|all|the\s+list)",
+            r"^list(\s+them|\s+all)?(\s+again)?$",
+            r"^show\s+results",
+        ]
+        import re
+        should_show_full_list = any(re.search(pat, msg_lower) for pat in show_list_patterns)
+        
+        if should_show_full_list:
+            # User wants to see the full list of previous results
+            last_results = SESSIONS.get_last_results(session_id)
+            if last_results:
+                result_summary = summarize_results_with_llm(last_results, SESSIONS.get(session_id))
+                return JSONResponse({
+                    "reply": result_summary,
+                    "preferences": {},
+                    "results": last_results  # Return full list
+                })
+            else:
+                return JSONResponse({
+                    "reply": "I don't have any previous search results. Try searching for apartments first!",
+                    "preferences": {},
+                    "results": []
+                })
+        
         # Check if this is a follow-up about the current listing
         current_listing = SESSIONS.get_current_listing(session_id)
         conversation_context = SESSIONS.get_conversation_context(session_id)
@@ -593,6 +622,12 @@ async def switch_mode(request: Request) -> JSONResponse:
     
     # Set the mode in session
     SESSIONS.set_mode(session_id, mode)
+    
+    # Clear conversation context when switching modes
+    # This prevents confusion between advisor discussions and broker searches
+    if mode == "broker":
+        SESSIONS.set_conversation_context(session_id, "")
+        SESSIONS.set_current_listing(session_id, None)
     
     # Generate appropriate response
     if mode == "advisor":
