@@ -25,6 +25,7 @@ from conversational import (
     summarize_results_with_llm,
     generate_greeting_with_llm,
     generate_help_with_llm,
+    generate_advisor_response,
 )
 
 
@@ -283,8 +284,38 @@ async def chat(request: Request) -> JSONResponse:
     if reset and session_id:
         SESSIONS.reset(session_id)
 
-    # Classify intent
-    intent, context = classify_intent(message)
+    # Check current mode
+    current_mode = SESSIONS.get_mode(session_id) if session_id else "broker"
+    
+    # If in advisor mode, route to advisor response
+    if current_mode == "advisor":
+        # Get conversation history for context (optional - you can implement this if needed)
+        conversation_history = []  # You could track this in session if desired
+        
+        # Get last broker search results to provide context to advisor
+        broker_listings = SESSIONS.get_last_results(session_id) if session_id else []
+        
+        advisor_result = generate_advisor_response(
+            user_question=message,
+            conversation_history=conversation_history,
+            broker_listings=broker_listings
+        )
+        
+        # Return empty results - frontend will keep existing cards visible in advisor mode
+        return JSONResponse({
+            "reply": advisor_result['response'],
+            "preferences": {},
+            "results": [],  # Frontend handles keeping cards visible
+            "mode": "advisor",
+            "sources": advisor_result.get('sources', []),
+            "suggested_questions": advisor_result.get('suggested_questions', [])
+        })
+
+    # Get current conversation context
+    conversation_context = SESSIONS.get_conversation_context(session_id) if session_id else ""
+
+    # Classify intent with conversation context
+    intent, context = classify_intent(message, conversation_context)
 
     # Handle greeting
     if intent == "greeting":
@@ -306,49 +337,130 @@ async def chat(request: Request) -> JSONResponse:
 
     # Handle detail request
     if intent == "detail" and session_id:
-        last_results = SESSIONS.get_last_results(session_id)
-        if not last_results:
-            return JSONResponse({
-                "reply": "I don't have any recent listings to reference. Try searching first, then ask me about a specific one!",
-                "preferences": {},
-                "results": []
-            })
-        
-        # Try to find the listing by context (title, position, etc.)
-        listing = None
-        ctx_lower = (context or "").lower()
-        
-        # Check for ordinal position: "first", "second", "third", "1st", "2nd", or digit
+        # Special case: "show me again" or similar should show full list, not single listing
+        msg_lower = message.lower().strip()
+        show_list_patterns = [
+            r"^show\s+(me\s+)?(them\s+)?(again|all|list|the\s+list)",
+            r"^(see|view|display)\s+(them|all|the\s+list)",
+            r"^list(\s+them|\s+all)?(\s+again)?$",
+            r"^show\s+results",
+        ]
         import re
-        ordinal_map = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3,
-                       "fourth": 4, "4th": 4, "fifth": 5, "5th": 5, "sixth": 6, "6th": 6}
-        for word, idx in ordinal_map.items():
-            if word in ctx_lower:
-                if idx <= len(last_results):
-                    listing = last_results[idx - 1]
-                break
-        # Or plain digit
-        if not listing:
-            m = re.search(r'\b(\d+)\b', ctx_lower)
-            if m:
-                idx = int(m.group(1))
-                if 1 <= idx <= len(last_results):
-                    listing = last_results[idx - 1]
+        should_show_full_list = any(re.search(pat, msg_lower) for pat in show_list_patterns)
         
-        # Or match by title/address substring
-        if not listing:
-            for item in last_results:
-                title = (item.get("title") or "").lower()
-                area = (item.get("area") or "").lower()
-                if ctx_lower in title or ctx_lower in area:
-                    listing = item
+        if should_show_full_list:
+            # User wants to see the full list of previous results
+            last_results = SESSIONS.get_last_results(session_id)
+            if last_results:
+                result_summary = summarize_results_with_llm(last_results, SESSIONS.get(session_id))
+                return JSONResponse({
+                    "reply": result_summary,
+                    "preferences": {},
+                    "results": last_results  # Return full list
+                })
+            else:
+                return JSONResponse({
+                    "reply": "I don't have any previous search results. Try searching for apartments first!",
+                    "preferences": {},
+                    "results": []
+                })
+        
+        # Check if this is a follow-up about the current listing
+        current_listing = SESSIONS.get_current_listing(session_id)
+        conversation_context = SESSIONS.get_conversation_context(session_id)
+        
+        # If we're in "discussing_listing" context, prefer to stay on current listing
+        # unless user explicitly asks for a different one (e.g., "tell me about the third one")
+        if conversation_context == "discussing_listing" and current_listing:
+            # Check if user is explicitly asking for a DIFFERENT listing
+            ctx_lower = (context or "").lower()
+            is_explicit_switch = False
+            
+            # Ordinal positions indicate switching listings
+            import re
+            ordinal_patterns = [
+                r'\b(first|second|third|fourth|fifth|sixth|1st|2nd|3rd|4th|5th|6th|\d+)\s*(listing|one|apartment)',
+                r'\b(the\s+)?(first|second|third|1st|2nd|3rd)\b'
+            ]
+            for pattern in ordinal_patterns:
+                if re.search(pattern, ctx_lower):
+                    is_explicit_switch = True
                     break
+            
+            # Also check if they mention a specific different address/title
+            if not is_explicit_switch and ctx_lower and len(ctx_lower) > 3:
+                current_title = (current_listing.get("title") or "").lower()
+                # If the context doesn't match current listing title, they might be switching
+                if ctx_lower not in current_title and current_title not in ctx_lower:
+                    # But only switch if it matches another listing
+                    last_results = SESSIONS.get_last_results(session_id)
+                    for item in last_results:
+                        if item == current_listing:
+                            continue  # Skip current listing
+                        title = (item.get("title") or "").lower()
+                        area = (item.get("area") or "").lower()
+                        if ctx_lower in title or ctx_lower in area:
+                            is_explicit_switch = True
+                            break
+            
+            if not is_explicit_switch:
+                # Stay on current listing - this is a follow-up question
+                listing = current_listing
+            else:
+                # User wants to switch to a different listing
+                listing = None
+        else:
+            # Not in conversation context, or no current listing
+            listing = None
         
-        if not listing and last_results:
-            # Default to first if ambiguous
-            listing = last_results[0]
+        # If we don't have a listing yet, find it from last results
+        if not listing:
+            last_results = SESSIONS.get_last_results(session_id)
+            if not last_results:
+                return JSONResponse({
+                    "reply": "I don't have any recent listings to reference. Try searching first, then ask me about a specific one!",
+                    "preferences": {},
+                    "results": []
+                })
+            
+            # Try to find the listing by context (title, position, etc.)
+            ctx_lower = (context or "").lower()
+            
+            # Check for ordinal position: "first", "second", "third", "1st", "2nd", or digit
+            import re
+            ordinal_map = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3,
+                           "fourth": 4, "4th": 4, "fifth": 5, "5th": 5, "sixth": 6, "6th": 6}
+            for word, idx in ordinal_map.items():
+                if word in ctx_lower:
+                    if idx <= len(last_results):
+                        listing = last_results[idx - 1]
+                    break
+            # Or plain digit
+            if not listing:
+                m = re.search(r'\b(\d+)\b', ctx_lower)
+                if m:
+                    idx = int(m.group(1))
+                    if 1 <= idx <= len(last_results):
+                        listing = last_results[idx - 1]
+            
+            # Or match by title/address substring
+            if not listing and ctx_lower:
+                for item in last_results:
+                    title = (item.get("title") or "").lower()
+                    area = (item.get("area") or "").lower()
+                    if ctx_lower in title or ctx_lower in area:
+                        listing = item
+                        break
+            
+            if not listing and last_results:
+                # Default to first if ambiguous
+                listing = last_results[0]
         
         if listing:
+            # Store this as the current listing we're discussing
+            SESSIONS.set_current_listing(session_id, listing)
+            SESSIONS.set_conversation_context(session_id, "discussing_listing")
+            
             summary = summarize_listing_with_llm(listing, user_question=message)
             return JSONResponse({
                 "reply": summary,
@@ -441,6 +553,9 @@ async def chat(request: Request) -> JSONResponse:
     # Store last results in session for detail queries
     if session_id and results:
         SESSIONS.set_last_results(session_id, results)
+        # Reset conversation context - we're showing new search results now
+        SESSIONS.set_conversation_context(session_id, "")
+        SESSIONS.set_current_listing(session_id, None)
 
     # Generate conversational result summary using LLM
     result_summary = summarize_results_with_llm(results, prefs)
@@ -482,6 +597,67 @@ def reset_session(request: Request) -> Dict[str, Any]:
     # Using Request.json() requires async; read from body via starlette if desired.
     # To keep simple, let /api/chat handle reset flag primarily.
     return {"status": "ok"}
+
+
+@app.post("/api/switch_mode")
+async def switch_mode(request: Request) -> JSONResponse:
+    """Switch between broker and advisor modes.
+    Body: { sessionId: string, mode: 'broker' | 'advisor' }
+    """
+    body = await request.json()
+    session_id = (body.get("sessionId") or body.get("session_id") or "").strip()
+    mode = (body.get("mode") or "broker").strip().lower()
+    
+    if mode not in ["broker", "advisor"]:
+        return JSONResponse({
+            "status": "error",
+            "message": "Invalid mode. Must be 'broker' or 'advisor'."
+        }, status_code=400)
+    
+    if not session_id:
+        return JSONResponse({
+            "status": "error",
+            "message": "sessionId is required."
+        }, status_code=400)
+    
+    # Set the mode in session
+    SESSIONS.set_mode(session_id, mode)
+    
+    # Clear conversation context when switching modes
+    # This prevents confusion between advisor discussions and broker searches
+    if mode == "broker":
+        SESSIONS.set_conversation_context(session_id, "")
+        SESSIONS.set_current_listing(session_id, None)
+    
+    # Generate appropriate response
+    if mode == "advisor":
+        reply = (
+            "🎓 **Advisor Mode activated!** I'm here to guide you through Sweden's rental housing market.\n\n"
+            "I can help you understand:\n"
+            "- How Bostadsförmedling queue systems work (Uppsala, Stockholm, etc.)\n"
+            "- Student housing options and strategies\n"
+            "- Budget planning and cost breakdowns\n"
+            "- Neighborhood comparisons and area insights\n"
+            "- Application tips and success strategies\n\n"
+            "Ask me anything about finding housing in Sweden! (I won't search apartments in this mode - "
+            "switch to Broker Mode for that)"
+        )
+    else:
+        reply = (
+            "🔍 **Broker Mode activated!** I'm ready to search for apartments.\n\n"
+            "Tell me what you're looking for:\n"
+            "- City (e.g., Uppsala, Stockholm)\n"
+            "- Budget (e.g., under 8000 kr/month)\n"
+            "- Number of rooms (e.g., 2 rooms, at least 3 rooms)\n"
+            "- Neighborhood (e.g., Luthagen, Södermalm)\n\n"
+            "I'll find the best matches for you!"
+        )
+    
+    return JSONResponse({
+        "status": "success",
+        "mode": mode,
+        "reply": reply
+    })
 
 
 # Static files and SPA index

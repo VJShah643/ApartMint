@@ -1,14 +1,20 @@
 # ApartMint
 
-ApartMint is a conversational apartment-hunting chatbot that helps users find homes through natural dialogue. It understands preferences like city, budget, rooms, and areas, remembers context across turns, and provides friendly, personalized recommendations — making apartment searching smooth and refreshingly minty 🍃.
+ApartMint is a conversational apartment-hunting assistant with **dual modes**:
+1. **Broker Mode** 🔍: Search and filter apartments across Uppsala
+2. **Advisor Mode** 🎓: Get expert guidance about Uppsala's housing market
+
+It understands preferences like city, budget, rooms, and areas, remembers context across turns, and provides friendly, personalized recommendations — making apartment searching smooth and refreshingly minty 🍃.
 
 ## Current status (Oct 2025)
 
+- **Dual-mode system**: Switch between apartment search (Broker) and housing consultation (Advisor)
+- **RAG-powered Advisor**: 7 comprehensive knowledge base guides covering Uppsala housing
 - **Backend**: FastAPI app serving a chat API and a modern SPA.
 - **Data**: Uses pre-scraped JSON datasets (`bostad.json`, `heimstaden.json`). The server auto-reloads data whenever these files change — ideal for a twice‑daily scraping job.
 - **LLM integration**: Google Gemini 2.0 Flash powers intelligent conversational features throughout the app.
-- **Session memory**: Per-session preference memory with TTL, so you can refine queries across turns (e.g., set city first, then add rooms and budget later) without repeating context.
-- **Fully LLM-powered conversation**: Intent classification, greetings, help responses, query parsing, result summaries, and listing details all use Gemini 2.0.
+- **Session memory**: Per-session preference memory with TTL, mode tracking, and conversation context.
+- **Fully LLM-powered conversation**: Intent classification, greetings, help responses, query parsing, result summaries, listing details, and advisor responses all use Gemini 2.0.
 - **Conversational UX**: 
   - Typing indicators (animated dots) while processing
   - Typewriter effect (character-by-character message display)
@@ -22,12 +28,22 @@ ApartMint is a conversational apartment-hunting chatbot that helps users find ho
 
 ## Project structure
 
-- `main.py` – FastAPI app: endpoints, loading/normalizing listings (preserves descriptions & facilities), intent routing, filtering/ranking, static site.
+- `main.py` – FastAPI app: endpoints, loading/normalizing listings (preserves descriptions & facilities), intent routing, filtering/ranking, mode switching, static site.
 - `schemas.py` – Pydantic models, especially `SearchQuery`.
 - `llm_client.py` – Gemini 2.0 Flash client for query parsing with JSON extraction and regex fallback.
 - `intent_classifier.py` – **LLM-powered** intent detection (greeting, help, detail, search) with regex fallback.
-- `conversational.py` – **LLM-powered** greetings, help responses, listing summaries (full descriptions), and result set intros with fallback templates.
-- `session_store.py` – In-memory session preferences + last_results tracking with TTL + merge rules.
+- `conversational.py` – **LLM-powered** greetings, help responses, listing summaries (full descriptions), result set intros, and **advisor responses with RAG**.
+- `session_store.py` – In-memory session preferences + last_results tracking + current_mode + conversation context with TTL + merge rules.
+- `rag_system.py` – **RAG system**: loads knowledge base markdown files, creates embeddings with sentence-transformers, retrieves relevant context with ChromaDB.
+- `advisor_prompts.py` – System prompts and prompt builders for advisor mode with grounding rules.
+- `knowledge_base/` – **7 comprehensive guides** (6,300+ lines total):
+  - `bostad_process.md` – Uppsala Bostadsförmedling complete guide
+  - `heimstaden_process.md` – Heimstaden application process
+  - `queue_strategies.md` – Queue day optimization tactics
+  - `student_housing.md` – Student housing options & strategies
+  - `budget_planning.md` – Financial planning for renters
+  - `area_comparisons.md` – Uppsala neighborhood guides
+  - `application_tips.md` – Winning application strategies
 - `translate_and_store.py` – Selective translation helpers (`*_en` fields) and JSON upsert utility.
 - `clean.py` – Standalone cleaner/translator for bulk JSON processing (optional).
 - `static/` – Minimal UI (`index.html`, `app.js` with typing effects, `styles.css`).
@@ -45,6 +61,8 @@ ApartMint is a conversational apartment-hunting chatbot that helps users find ho
 pip install -r requirements.txt
 uvicorn main:app --reload
 \`\`\`
+
+**Note**: The first request will initialize the RAG knowledge base (takes ~30 seconds to load embeddings). Subsequent requests will be fast.
 
 **Open:** http://127.0.0.1:8000/
 
@@ -64,8 +82,28 @@ Health check.
 ### GET /api/listings?limit=24
 Returns the first N normalized listings from the in-memory cache. The server will auto‑reload if `bostad.json` / `heimstaden.json` changed since last load.
 
+### POST /api/switch_mode
+Switch between broker and advisor modes.
+
+**Request body:**
+\`\`\`json
+{
+  "sessionId": "<client-stable-uuid>",
+  "mode": "advisor"  // or "broker"
+}
+\`\`\`
+
+**Response:**
+\`\`\`json
+{
+  "status": "success",
+  "mode": "advisor",
+  "reply": "🎓 Advisor Mode activated! I'm here to guide you through Uppsala's housing market..."
+}
+\`\`\`
+
 ### POST /api/chat
-Main conversational endpoint. Uses LLM to classify intent, handle greetings/help/detail/search, merge with session memory, filter/rank cached database, and generate natural responses.
+Main conversational endpoint. Uses LLM to classify intent, route to appropriate mode (broker or advisor), and generate natural responses.
 
 **Request body:**
 \`\`\`json
@@ -111,6 +149,22 @@ Main conversational endpoint. Uses LLM to classify intent, handle greetings/help
 }
 \`\`\`
 
+**Response (advisor mode):**
+\`\`\`json
+{
+  "reply": "Great question! Uppsala Bostadsförmedling (Bostad Uppsala) uses a queue-based system...",
+  "preferences": {},
+  "results": [],
+  "mode": "advisor",
+  "sources": ["bostad_process.md", "queue_strategies.md"],
+  "suggested_questions": [
+    "How long does it take to get an apartment?",
+    "Can I keep accumulating queue days while renting?",
+    "What are the cheapest neighborhoods in Uppsala?"
+  ]
+}
+\`\`\`
+
 **Response (detail):**
 \`\`\`json
 {
@@ -139,6 +193,27 @@ All LLM interactions use `gemini-2.0-flash-exp` for optimal performance, accurac
 | **Query Parsing** | Extracts structured SearchQuery (city, rooms, budget, etc.) from free-form text | Regex extraction |
 | **Result Summaries** | Creates 2-3 sentence natural intro to search results with insights | Template with count/filters |
 | **Listing Details** | Generates 3-5 sentence rich summaries with **full description context** | Template with truncated description |
+| **Advisor Responses** | **RAG-powered**: Retrieves relevant knowledge base context, generates grounded answers | Error message with suggestions |
+
+### RAG System (Advisor Mode)
+
+The advisor mode uses **Retrieval-Augmented Generation** to provide accurate, grounded responses:
+
+1. **Knowledge Base**: 7 comprehensive markdown guides (6,300+ lines) covering Uppsala housing
+2. **Embedding Model**: `sentence-transformers/all-MiniLM-L6-v2` for semantic search
+3. **Vector Store**: ChromaDB for efficient similarity search
+4. **Retrieval**: Top 5 most relevant chunks retrieved per query
+5. **Grounding**: LLM only uses retrieved context (no hallucination)
+6. **Sources**: Responses cite which knowledge base files were consulted
+
+**Knowledge Base Topics**:
+- Uppsala Bostadsförmedling queue system & process
+- Heimstaden application requirements & timeline
+- Queue day optimization strategies
+- Student housing options (Studentstaden, nations, etc.)
+- Budget planning & cost breakdowns
+- Uppsala area comparisons & neighborhood guides
+- Application tips & success strategies
 
 ### LLM Calls Per Request Type
 

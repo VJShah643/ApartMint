@@ -35,12 +35,75 @@ function removeTypingIndicator() {
   if (indicator) indicator.remove();
 }
 
+function formatMarkdown(text) {
+  // Convert markdown to HTML for rendering
+  return text
+    // Bold: **text** -> <strong>text</strong>
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    // Bullet points: - item -> <li>item</li>
+    .replace(/^- (.+)$/gm, '<li>$1</li>')
+    // Wrap consecutive list items in <ul>
+    .replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+    // Line breaks
+    .replace(/\n\n/g, '<br><br>');
+}
+
 async function typeText(bubble, text, speed = 15) {
-  bubble.textContent = '';
-  for (let i = 0; i < text.length; i++) {
-    bubble.textContent += text[i];
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    if (speed > 0) await new Promise(r => setTimeout(r, speed));
+  // Check if text contains markdown formatting
+  const hasMarkdown = /\*\*/.test(text) || /^- /m.test(text);
+  
+  if (hasMarkdown) {
+    // For markdown text, convert to HTML first
+    const htmlContent = formatMarkdown(text);
+    
+    // Create a temporary div to parse the HTML
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = htmlContent;
+    
+    // Clear bubble and type out the HTML content with formatting
+    bubble.innerHTML = '';
+    
+    // Type character by character, preserving HTML structure
+    await typeHTMLContent(bubble, tempDiv.childNodes, speed);
+  } else {
+    // Plain text - use typing animation
+    bubble.textContent = '';
+    for (let i = 0; i < text.length; i++) {
+      bubble.textContent += text[i];
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (speed > 0) await new Promise(r => setTimeout(r, speed));
+    }
+  }
+}
+
+async function typeHTMLContent(targetElement, nodes, speed) {
+  // Recursively type HTML nodes while preserving structure
+  for (const node of nodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      // Type text content character by character
+      const text = node.textContent;
+      const textNode = document.createTextNode('');
+      targetElement.appendChild(textNode);
+      
+      for (let i = 0; i < text.length; i++) {
+        textNode.textContent += text[i];
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        if (speed > 0) await new Promise(r => setTimeout(r, speed));
+      }
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      // Create the element and recursively type its children
+      const element = document.createElement(node.tagName);
+      
+      // Copy attributes
+      for (const attr of node.attributes || []) {
+        element.setAttribute(attr.name, attr.value);
+      }
+      
+      targetElement.appendChild(element);
+      
+      // Recursively type children
+      await typeHTMLContent(element, node.childNodes, speed);
+    }
   }
 }
 
@@ -88,6 +151,8 @@ function renderCards(items) {
 
 // Session handling: keep a stable sessionId in localStorage
 const SESSION_KEY = 'apartmint_session_id';
+const MODE_KEY = 'apartmint_current_mode';
+
 function getSessionId() {
   let id = localStorage.getItem(SESSION_KEY);
   if (!id) {
@@ -95,6 +160,68 @@ function getSessionId() {
     localStorage.setItem(SESSION_KEY, id);
   }
   return id;
+}
+
+function getCurrentMode() {
+  return localStorage.getItem(MODE_KEY) || 'broker';
+}
+
+function setCurrentMode(mode) {
+  localStorage.setItem(MODE_KEY, mode);
+  updateModeUI(mode);
+}
+
+function updateModeUI(mode) {
+  const brokerBtn = document.getElementById('broker-mode-btn');
+  const advisorBtn = document.getElementById('advisor-mode-btn');
+  const modeToggle = document.querySelector('.mode-toggle');
+  
+  // Update button active states
+  if (mode === 'broker') {
+    brokerBtn.classList.add('mode-btn--active');
+    advisorBtn.classList.remove('mode-btn--active');
+  } else {
+    advisorBtn.classList.add('mode-btn--active');
+    brokerBtn.classList.remove('mode-btn--active');
+  }
+  
+  // Update data attribute for sliding animation
+  if (modeToggle) {
+    modeToggle.setAttribute('data-active-mode', mode);
+  }
+}
+
+async function switchMode(mode) {
+  const btn = $('#chat-form button');
+  btn.disabled = true;
+  
+  try {
+    const resp = await fetch('/api/switch_mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: getSessionId(), mode })
+    });
+    
+    if (!resp.ok) throw new Error('Mode switch failed');
+    const data = await resp.json();
+    
+    // Update local mode silently (no chat message)
+    setCurrentMode(mode);
+    
+    // Update summary text based on mode (but keep listings visible)
+    if (mode === 'advisor') {
+      // Don't clear cards - keep listings visible for advisor to reference
+      summaryEl.textContent = '🎓 Ask me anything about housing in Sweden!';
+    } else {
+      summaryEl.textContent = '🔍 Tell me what you\'re looking for to see listings.';
+    }
+  } catch (e) {
+    // Only show error if switch actually failed
+    const errBubble = addMessage('', 'bot');
+    await typeText(errBubble, 'Sorry, mode switch failed. Please try again.', 15);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function sendMessage(text, { reset = false } = {}) {
@@ -121,9 +248,11 @@ async function sendMessage(text, { reset = false } = {}) {
     
     const prefs = data.preferences || {};
     const results = data.results || [];
+    const currentMode = data.mode || getCurrentMode();
     
-    // Only show filter summary and cards if we have results
-    if (results.length > 0) {
+    // Only update cards if in broker mode or if we have new results
+    if (currentMode === 'broker' && results.length > 0) {
+      // Broker mode with results - update cards
       const parts = [];
       if (prefs.city) parts.push(`near ${prefs.city}`);
       if (prefs.rooms && prefs.maxRooms && prefs.rooms === prefs.maxRooms) {
@@ -138,11 +267,12 @@ async function sendMessage(text, { reset = false } = {}) {
       if (prefs.budget) parts.push(`≤ ${fmt(prefs.budget)} kr/mo`);
       summaryEl.textContent = parts.length ? `Showing results ${parts.join(', ')}` : 'Showing recommended results';
       renderCards(results);
-    } else {
-      // No results (greeting/help/detail with no match) — clear cards but keep summary friendly
-      summaryEl.textContent = 'Ask me anything about apartments!';
-      cardsEl.innerHTML = '';
+    } else if (currentMode === 'broker' && results.length === 0) {
+      // Broker mode with no results - might be greeting/help
+      summaryEl.textContent = 'Tell me what you\'re looking for to see listings.';
+      // Don't clear cards - keep previous search visible
     }
+    // In advisor mode, don't touch cards at all - they stay from last broker search
   } catch (e) {
     removeTypingIndicator();
     const errBubble = addMessage('', 'bot');
@@ -173,6 +303,22 @@ async function sendMessage(text, { reset = false } = {}) {
 
 // Optional: add a New Search button dynamically beside the send button
 window.addEventListener('DOMContentLoaded', () => {
+  // Initialize mode UI
+  updateModeUI(getCurrentMode());
+  
+  // Add mode toggle event listeners
+  document.getElementById('broker-mode-btn').addEventListener('click', () => {
+    if (getCurrentMode() !== 'broker') {
+      switchMode('broker');
+    }
+  });
+  
+  document.getElementById('advisor-mode-btn').addEventListener('click', () => {
+    if (getCurrentMode() !== 'advisor') {
+      switchMode('advisor');
+    }
+  });
+  
   const form = $('#chat-form');
   const resetBtn = document.createElement('button');
   resetBtn.type = 'button';

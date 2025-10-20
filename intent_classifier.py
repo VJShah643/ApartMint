@@ -11,28 +11,32 @@ load_dotenv()
 IntentType = Literal["greeting", "help", "detail", "search"]
 
 
-def classify_intent(message: str) -> Tuple[IntentType, Optional[str]]:
+def classify_intent(message: str, conversation_context: str = "") -> Tuple[IntentType, Optional[str]]:
     """Classify user message into intent type using LLM, with regex fallback.
+    
+    Args:
+        message: User's message
+        conversation_context: Current conversation context (e.g., "discussing_listing")
     
     Returns: (intent, context)
         - greeting: "hey", "hello", "hi"
         - help: "what can you do", "help", "how does this work"
-        - detail: "tell me more about X", "details on the second listing"
+        - detail: "tell me more about X", "details on the second listing", OR follow-up questions about current listing
         - search: default for apartment search queries
     """
     # Try LLM classification first
     try:
-        result = _classify_with_llm(message)
+        result = _classify_with_llm(message, conversation_context)
         if result:
             return result
     except Exception:
         pass  # Fall back to regex
     
     # Fallback: regex-based classification
-    return _classify_with_regex(message)
+    return _classify_with_regex(message, conversation_context)
 
 
-def _classify_with_llm(message: str) -> Optional[Tuple[IntentType, Optional[str]]]:
+def _classify_with_llm(message: str, conversation_context: str = "") -> Optional[Tuple[IntentType, Optional[str]]]:
     """Use Gemini to classify intent."""
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_API_KEY")
     if not api_key:
@@ -43,16 +47,26 @@ def _classify_with_llm(message: str) -> Optional[Tuple[IntentType, Optional[str]
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.0-flash-exp")
         
+        context_hint = ""
+        if conversation_context == "discussing_listing":
+            context_hint = (
+                "\n\nIMPORTANT: The user is currently discussing a specific apartment listing. "
+                "If their message is a follow-up question about that listing (e.g., asking about features, "
+                "utilities, amenities, details) OR if they want to see that listing again (e.g., 'show me again', "
+                "'tell me about that one', 'display it'), classify it as 'detail' intent with context='current', NOT 'search'."
+            )
+        
         prompt = (
             "You are an intent classifier for an apartment search chatbot. "
             "Classify the user message into ONE of these intents:\n\n"
             "1. greeting - User is saying hello, hi, hey, good morning, etc.\n"
             "2. help - User wants to know what you can do, asking for help, capabilities, how to use\n"
-            "3. detail - User wants more information about a specific listing (e.g., 'tell me about the second one', 'more info on Studentstaden')\n"
-            "4. search - User is searching for apartments (city, budget, rooms, areas, etc.)\n\n"
+            "3. detail - User wants more information about a specific listing OR is asking a follow-up question about the current listing they're discussing\n"
+            "4. search - User is searching for apartments (city, budget, rooms, areas, etc.)\n"
+            f"{context_hint}\n"
             f"User message: \"{message}\"\n\n"
             "Return ONLY a JSON object: {\"intent\": \"greeting|help|detail|search\", \"context\": \"optional context for detail requests\"}\n"
-            "If intent is 'detail', extract the listing reference in context (e.g., 'second', 'Studentstaden 22', '2')."
+            "If intent is 'detail', extract the listing reference in context (e.g., 'second', 'Studentstaden 22', '2', or 'current' for follow-up questions)."
         )
         
         resp = model.generate_content(prompt)
@@ -81,9 +95,24 @@ def _classify_with_llm(message: str) -> Optional[Tuple[IntentType, Optional[str]
         return None
 
 
-def _classify_with_regex(message: str) -> Tuple[IntentType, Optional[str]]:
+def _classify_with_regex(message: str, conversation_context: str = "") -> Tuple[IntentType, Optional[str]]:
     """Regex-based fallback classification."""
     msg_lower = message.lower().strip()
+    
+    # If we're discussing a listing and the message is a short question, it's likely a follow-up
+    if conversation_context == "discussing_listing":
+        # Questions about features/utilities or requests to see listing again
+        follow_up_patterns = [
+            r"\b(does it have|is there|are there|what about|how about)\b",
+            r"\b(internet|water|electricity|heating|utilities|included|extra)\b",
+            r"\b(balcony|parking|elevator|laundry|pets|furnished)\b",
+            r"^(so|and|also|what|when|where|how|why)\s+",
+            r"\b(show|tell|describe|display)\s+(me|it|that|this)\s+(again|once more)\b",
+            r"\b(that|this|the)\s+(listing|apartment|one|place)\b",
+        ]
+        for pat in follow_up_patterns:
+            if re.search(pat, msg_lower):
+                return ("detail", "current")
     
     # Greeting
     greeting_patterns = [
